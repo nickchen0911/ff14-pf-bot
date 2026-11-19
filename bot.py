@@ -201,7 +201,10 @@ class JobSelectView(discord.ui.View):
 
     async def on_select(self, interaction: discord.Interaction):
         chosen = self.select.values[0]
-        print(f"[選單觸發] 使用者={interaction.user} | 職能={self.role_key} | 選擇={chosen}")
+        print(
+            f"[選單觸發] 使用者={interaction.user} | 職能={self.role_key} | "
+            f"選擇={chosen} | board_msg_id={getattr(self.board_message, 'id', None)}"
+        )
         await self.parent_view.apply_job_selection(
             interaction=interaction,
             role_key=self.role_key,
@@ -218,6 +221,7 @@ class RecruitView(discord.ui.View):
         super().__init__(timeout=None)
         self.data = data
         self.notified_full = False
+        self.board_message: discord.Message | None = None
 
         if self.data["mode"] == "all_jobs":
             self.remove_item(self.join_tank)
@@ -351,7 +355,13 @@ class RecruitView(discord.ui.View):
     async def _open_job_selector(
         self, interaction: discord.Interaction, role_key: str
     ):
-        print(f"[按鈕觸發] 使用者={interaction.user} | 職能={role_key} | msg_id={getattr(interaction.message, 'id', None)}")
+        if interaction.message is not None:
+            self.board_message = interaction.message
+
+        print(
+            f"[按鈕觸發] 使用者={interaction.user} | 職能={role_key} | "
+            f"msg_id={getattr(self.board_message, 'id', None)}"
+        )
         cfg = ROLE_CONFIG[role_key]
         target_list = self.data[role_key]
         already_in_this_role = any(
@@ -368,7 +378,7 @@ class RecruitView(discord.ui.View):
         selector_view = JobSelectView(
             parent_view=self,
             role_key=role_key,
-            board_message=interaction.message,
+            board_message=self.board_message,
         )
         await interaction.response.send_message(
             f"請選擇你想加入的 **{cfg['display']}** 職業：",
@@ -386,6 +396,7 @@ class RecruitView(discord.ui.View):
         user = interaction.user
         cfg = ROLE_CONFIG[role_key]
         target_list = self.data[role_key]
+        target_msg = board_message or self.board_message or interaction.message
 
         try:
             if chosen_job is None:
@@ -424,22 +435,15 @@ class RecruitView(discord.ui.View):
 
             print(
                 f"[招募更新] 標題={self.data['title']} | "
-                f"T={len(self.data['tanks'])}/2, H={len(self.data['healers'])}/2, D={len(self.data['dps'])}/4"
+                f"T={len(self.data['tanks'])}/2, H={len(self.data['healers'])}/2, D={len(self.data['dps'])}/4 | "
+                f"target_msg_id={getattr(target_msg, 'id', None)}"
             )
 
-            channel = interaction.channel
-            if channel is None and board_message is not None:
-                channel = board_message.channel
-
-            if (
-                board_message is not None
-                and channel is not None
-                and hasattr(channel, "fetch_message")
-            ):
-                fresh_msg = await channel.fetch_message(board_message.id)
-                await fresh_msg.edit(embed=self.create_embed(), view=self)
-            elif board_message is not None:
-                await board_message.edit(embed=self.create_embed(), view=self)
+            if target_msg is not None:
+                await target_msg.edit(embed=self.create_embed(), view=self)
+                print("[招募更新] 看板訊息編輯完成")
+            else:
+                print("[招募更新] 找不到目標招募看板訊息，無法更新")
 
             if chosen_job is not None:
                 await self._check_and_notify_full(interaction)
