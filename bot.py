@@ -29,13 +29,12 @@ def start_health_server():
 
 
 # ==========================================
-# 2. 第一層職能與第二層職位設定
+# 2. 第一層職能與第二層定位設定
 # ==========================================
 ROLE_POSITIONS = {
     "tanks": {
         "limit": 2,
         "display": "Tank",
-        "label_prefix": "＋ 選 Tank",
         "positions": [
             ("MT", discord.ButtonStyle.primary),
             ("ST", discord.ButtonStyle.primary),
@@ -45,7 +44,6 @@ ROLE_POSITIONS = {
     "healers": {
         "limit": 2,
         "display": "Healer",
-        "label_prefix": "＋ 選 Healer",
         "positions": [
             ("H1", discord.ButtonStyle.success),
             ("H2", discord.ButtonStyle.success),
@@ -55,7 +53,6 @@ ROLE_POSITIONS = {
     "dps": {
         "limit": 4,
         "display": "DPS",
-        "label_prefix": "＋ 選 DPS",
         "positions": [
             ("近戰", discord.ButtonStyle.danger),
             ("遠程", discord.ButtonStyle.danger),
@@ -130,7 +127,7 @@ class RecruitModal(discord.ui.Modal):
                 return
             max_total = int(raw_slots)
 
-        # 規定職能模式下，每筆資料為 {"user": discord.User, "position": str}
+        # 規定職能模式下，每筆紀錄為 {"user": discord.User, "position": str}
         party_data = {
             "leader": interaction.user,
             "mode": self.mode,
@@ -153,7 +150,7 @@ class RecruitModal(discord.ui.Modal):
 
 
 # ==========================================
-# 5. 第二層：職位選擇按鈕 View
+# 5. 第二層：定位選擇按鈕 View
 # ==========================================
 class PositionSelectView(discord.ui.View):
     def __init__(
@@ -249,7 +246,7 @@ class RecruitView(discord.ui.View):
         if not entries:
             return "（尚無）"
         return "\n".join(
-            [f"{entry['user'].mention} — **{entry['position']}**" for entry in entries]
+            [f"• {entry['user'].mention} → **{entry['position']}**" for entry in entries]
         )
 
     def create_embed(self):
@@ -258,7 +255,7 @@ class RecruitView(discord.ui.View):
         is_full = total >= max_total
 
         mode_text = (
-            "規定職能 (2T / 2H / 4D・兩層選職位)"
+            "規定職能 (2T / 2H / 4D・兩層選定位)"
             if self.data["mode"] == "role_restricted"
             else "所有職業（不限職能）"
         )
@@ -302,9 +299,28 @@ class RecruitView(discord.ui.View):
             )
 
         embed.set_footer(
-            text=f"目前人數：{total}/{max_total} ｜ 點擊職能按鈕後選擇對應職位"
+            text=f"目前人數：{total}/{max_total} ｜ 點擊職能按鈕後選擇對應定位"
         )
         return embed
+
+    async def _refresh_board_message(
+        self, interaction: discord.Interaction, board_message: discord.Message | None
+    ):
+        target_msg = board_message or self.board_message
+        new_embed = self.create_embed()
+
+        if target_msg is not None:
+            await target_msg.edit(embed=new_embed, view=self)
+            return
+
+        if interaction.channel and hasattr(interaction.channel, "history"):
+            async for msg in interaction.channel.history(limit=15):
+                if msg.author.id == bot.user.id and msg.embeds:
+                    first_title = msg.embeds[0].title or ""
+                    if self.data["title"] in first_title:
+                        self.board_message = msg
+                        await msg.edit(embed=new_embed, view=self)
+                        return
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
         total_members = self._current_count()
@@ -359,7 +375,7 @@ class RecruitView(discord.ui.View):
             board_message=self.board_message,
         )
         await interaction.response.send_message(
-            f"請選擇你想擔任的 **{cfg['display']}** 職位：",
+            f"請選擇你想擔任的 **{cfg['display']}** 定位：",
             view=pos_view,
             ephemeral=True,
         )
@@ -374,7 +390,6 @@ class RecruitView(discord.ui.View):
         user = interaction.user
         cfg = ROLE_POSITIONS[role_key]
         target_list = self.data[role_key]
-        target_msg = board_message or self.board_message
 
         try:
             if chosen_position is None:
@@ -405,8 +420,7 @@ class RecruitView(discord.ui.View):
                     view=None,
                 )
 
-            if target_msg is not None:
-                await target_msg.edit(embed=self.create_embed(), view=self)
+            await self._refresh_board_message(interaction, board_message)
 
             if chosen_position is not None:
                 await self._check_and_notify_full(interaction)
