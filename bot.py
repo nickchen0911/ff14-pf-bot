@@ -258,7 +258,7 @@ class RecruitView(discord.ui.View):
         is_full = total >= max_total
 
         mode_text = (
-            "規定職能 (2T / 2H / 4D・兩層選定位)"
+            "規定職能 (2T / 2H / 4D・兩段式更新)"
             if self.data["mode"] == "role_restricted"
             else "所有職業（不限職能）"
         )
@@ -302,7 +302,7 @@ class RecruitView(discord.ui.View):
             )
 
         embed.set_footer(
-            text=f"目前人數：{total}/{max_total} ｜ 點擊職能按鈕後選擇對應定位"
+            text=f"目前人數：{total}/{max_total} ｜ 點擊職能按鈕先登記職能，再選定位"
         )
         return embed
 
@@ -318,7 +318,7 @@ class RecruitView(discord.ui.View):
         mid = message_id or self.board_message_id
 
         if cid is None or mid is None:
-            print(f"[雙層更新失敗] 缺少 cid={cid} 或 mid={mid}")
+            print(f"[第二次更新失敗] 缺少 cid={cid} 或 mid={mid}")
             return
 
         channel = bot.get_channel(cid)
@@ -327,7 +327,7 @@ class RecruitView(discord.ui.View):
 
         msg = await channel.fetch_message(mid)
         await msg.edit(embed=self.create_embed(), view=self)
-        print(f"[雙層更新成功] cid={cid}, mid={mid}")
+        print(f"[第二次更新完成] cid={cid}, mid={mid}")
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
         total_members = self._current_count()
@@ -367,18 +367,29 @@ class RecruitView(discord.ui.View):
         elif interaction.channel is not None:
             self.board_channel_id = interaction.channel.id
 
+        user = interaction.user
         cfg = ROLE_POSITIONS[role_key]
         target_list = self.data[role_key]
-        already_in_role = any(
-            entry["user"].id == interaction.user.id for entry in target_list
+
+        existing_entry = next(
+            (entry for entry in target_list if entry["user"].id == user.id), None
         )
 
-        if not already_in_role and len(target_list) >= cfg["limit"]:
+        if existing_entry is None and len(target_list) >= cfg["limit"]:
             await interaction.response.send_message(
                 f"❌ {cfg['display']} 已經額滿（{cfg['limit']}/{cfg['limit']}）囉！",
                 ephemeral=True,
             )
             return
+
+        # 第一層：先登記職能並直接更新一次主招募看板
+        self._remove_user_from_all_roles(user.id)
+        pending_pos = existing_entry["position"] if existing_entry else "選擇定位中..."
+        target_list.append({"user": user, "position": pending_pos})
+        self._sync_role_buttons()
+
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+        print(f"[第一次更新完成] 使用者={user} | 職能={role_key}")
 
         pos_view = PositionSelectView(
             parent_view=self,
@@ -386,8 +397,8 @@ class RecruitView(discord.ui.View):
             channel_id=self.board_channel_id,
             message_id=self.board_message_id,
         )
-        await interaction.response.send_message(
-            f"請選擇你想擔任的 **{cfg['display']}** 定位：",
+        await interaction.followup.send(
+            f"已先將你登記在 **{cfg['display']}**，請選擇你想擔任的定位：",
             view=pos_view,
             ephemeral=True,
         )
@@ -415,24 +426,29 @@ class RecruitView(discord.ui.View):
                 )
                 await interaction.response.edit_message(content=msg, view=None)
             else:
-                existing_in_target = next(
-                    (entry for entry in target_list if entry["user"].id == user.id), None
-                )
-                if existing_in_target is None and len(target_list) >= cfg["limit"]:
-                    await interaction.response.edit_message(
-                        content=f"❌ {cfg['display']} 剛剛已經額滿囉！", view=None
-                    )
-                    return
+                updated = False
+                for entry in target_list:
+                    if entry["user"].id == user.id:
+                        entry["position"] = chosen_position
+                        updated = True
+                        break
 
-                self._remove_user_from_all_roles(user.id)
-                target_list.append({"user": user, "position": chosen_position})
+                if not updated:
+                    if len(target_list) >= cfg["limit"]:
+                        await interaction.response.edit_message(
+                            content=f"❌ {cfg['display']} 剛剛已經額滿囉！", view=None
+                        )
+                        return
+                    self._remove_user_from_all_roles(user.id)
+                    target_list.append({"user": user, "position": chosen_position})
+
                 self._sync_role_buttons()
-
                 await interaction.response.edit_message(
-                    content=f"✅ 已登記為 **{cfg['display']} — {chosen_position}**！",
+                    content=f"✅ 已更新定位為 **{cfg['display']} — {chosen_position}**！",
                     view=None,
                 )
 
+            # 第二層：選完定位後再更新一次主招募看板
             await self._refresh_board_by_ids(interaction, channel_id, message_id)
 
             if chosen_position is not None:
