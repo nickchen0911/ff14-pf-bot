@@ -64,7 +64,7 @@ ROLE_CONFIG = {
             ("DRG", "龍騎士 (DRG) - 近戰"),
             ("NIN", "忍者 (NIN) - 近戰"),
             ("SAM", "武士 (SAM) - 近戰"),
-            ("RPR", " reaper / 鐮刀手 (RPR) - 近戰"),
+            ("RPR", "钐鐮客 (RPR) - 近戰"),
             ("VPR", "蝰蛇劍士 (VPR) - 近戰"),
             ("BRD", "吟遊詩人 (BRD) - 遠敏"),
             ("MCH", "機工士 (MCH) - 遠敏"),
@@ -144,7 +144,6 @@ class RecruitModal(discord.ui.Modal):
                 return
             max_total = int(raw_slots)
 
-        # 規定職能模式下，每筆紀錄為 dict: {"user": discord.Member, "job": str}
         party_data = {
             "leader": interaction.user,
             "mode": self.mode,
@@ -160,24 +159,28 @@ class RecruitModal(discord.ui.Modal):
         view = RecruitView(party_data)
         embed = view.create_embed()
         await interaction.response.send_message(embed=embed, view=view)
-        view.message = await interaction.original_response()
 
 
 # ==========================================
 # 5. 職能專屬職業選擇下拉選單 View
 # ==========================================
 class JobSelectView(discord.ui.View):
-    def __init__(self, parent_view: "RecruitView", role_key: str):
+    def __init__(
+        self,
+        parent_view: "RecruitView",
+        role_key: str,
+        board_message: discord.Message,
+    ):
         super().__init__(timeout=60)
         self.parent_view = parent_view
         self.role_key = role_key
+        self.board_message = board_message
         cfg = ROLE_CONFIG[role_key]
 
         options = [
             discord.SelectOption(label=job_label, value=job_label)
             for _, job_label in cfg["jobs"]
         ]
-        # 加上取消此職能報名的選項
         options.append(
             discord.SelectOption(
                 label="❌ 取消此職能 / 退出目前報名",
@@ -201,6 +204,7 @@ class JobSelectView(discord.ui.View):
             interaction=interaction,
             role_key=self.role_key,
             chosen_job=None if chosen == "__CANCEL__" else chosen,
+            board_message=self.board_message,
         )
 
 
@@ -212,7 +216,6 @@ class RecruitView(discord.ui.View):
         super().__init__(timeout=None)
         self.data = data
         self.notified_full = False
-        self.message: discord.Message | None = None
 
         if self.data["mode"] == "all_jobs":
             self.remove_item(self.join_tank)
@@ -359,7 +362,12 @@ class RecruitView(discord.ui.View):
             )
             return
 
-        selector_view = JobSelectView(parent_view=self, role_key=role_key)
+        # 直接傳入觸發按鈕的那則看板訊息 (interaction.message)
+        selector_view = JobSelectView(
+            parent_view=self,
+            role_key=role_key,
+            board_message=interaction.message,
+        )
         await interaction.response.send_message(
             f"請選擇你想加入的 **{cfg['display']}** 職業：",
             view=selector_view,
@@ -371,22 +379,23 @@ class RecruitView(discord.ui.View):
         interaction: discord.Interaction,
         role_key: str,
         chosen_job: str | None,
+        board_message: discord.Message,
     ):
         user = interaction.user
         cfg = ROLE_CONFIG[role_key]
         target_list = self.data[role_key]
 
-        # 取消報名
+        # 1. 取消報名
         if chosen_job is None:
             removed = self._remove_user_from_all_roles(user.id)
             self._sync_role_button_labels()
-            if self.message:
-                await self.message.edit(embed=self.create_embed(), view=self)
             msg = "已取消你的目前職能報名。" if removed else "你目前尚未在任何職能名單中。"
+            # 先立刻回應 ephemeral 選單互動，避免超時或令牌失效
             await interaction.response.edit_message(content=msg, view=None)
+            await board_message.edit(embed=self.create_embed(), view=self)
             return
 
-        # 檢查是否已在目標職能內（改選同職能下的其他職業不佔新缺額）
+        # 2. 檢查目標職能是否已額滿
         existing_in_target = next(
             (entry for entry in target_list if entry["user"].id == user.id), None
         )
@@ -396,17 +405,15 @@ class RecruitView(discord.ui.View):
             )
             return
 
-        # 若原本在其他職能或同職能，先移除舊紀錄再加入最新職業
+        # 3. 更新名單並立刻回應選單互動，再更新看板
         self._remove_user_from_all_roles(user.id)
         target_list.append({"user": user, "job": chosen_job})
-
         self._sync_role_button_labels()
-        if self.message:
-            await self.message.edit(embed=self.create_embed(), view=self)
 
         await interaction.response.edit_message(
             content=f"✅ 已登記為 **{cfg['display']} — {chosen_job}**！", view=None
         )
+        await board_message.edit(embed=self.create_embed(), view=self)
         await self._check_and_notify_full(interaction)
 
     @discord.ui.button(
