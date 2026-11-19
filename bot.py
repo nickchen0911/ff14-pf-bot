@@ -172,7 +172,7 @@ class JobSelectView(discord.ui.View):
         role_key: str,
         board_message: discord.Message | None,
     ):
-        super().__init__(timeout=60)
+        super().__init__(timeout=180)
         self.parent_view = parent_view
         self.role_key = role_key
         self.board_message = board_message
