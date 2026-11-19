@@ -1,5 +1,6 @@
 import os
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Literal
 import discord
@@ -28,7 +29,44 @@ def start_health_server():
 
 
 # ==========================================
-# 2. 初始化 Discord 機器人
+# 2. 第一層職能與第二層職位設定
+# ==========================================
+ROLE_POSITIONS = {
+    "tanks": {
+        "limit": 2,
+        "display": "Tank",
+        "label_prefix": "＋ 選 Tank",
+        "positions": [
+            ("MT", discord.ButtonStyle.primary),
+            ("ST", discord.ButtonStyle.primary),
+            ("都可以", discord.ButtonStyle.secondary),
+        ],
+    },
+    "healers": {
+        "limit": 2,
+        "display": "Healer",
+        "label_prefix": "＋ 選 Healer",
+        "positions": [
+            ("H1", discord.ButtonStyle.success),
+            ("H2", discord.ButtonStyle.success),
+            ("都可以", discord.ButtonStyle.secondary),
+        ],
+    },
+    "dps": {
+        "limit": 4,
+        "display": "DPS",
+        "label_prefix": "＋ 選 DPS",
+        "positions": [
+            ("近戰", discord.ButtonStyle.danger),
+            ("遠程", discord.ButtonStyle.danger),
+            ("都可以", discord.ButtonStyle.secondary),
+        ],
+    },
+}
+
+
+# ==========================================
+# 3. 初始化 Discord 機器人
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -45,7 +83,7 @@ async def on_ready():
 
 
 # ==========================================
-# 3. 招募彈出視窗 (Modal)
+# 4. 招募彈出視窗 (Modal)
 # ==========================================
 class RecruitModal(discord.ui.Modal):
     title_input = discord.ui.TextInput(
@@ -92,6 +130,7 @@ class RecruitModal(discord.ui.Modal):
                 return
             max_total = int(raw_slots)
 
+        # 規定職能模式下，每筆資料為 {"user": discord.User, "position": str}
         party_data = {
             "leader": interaction.user,
             "mode": self.mode,
@@ -107,16 +146,69 @@ class RecruitModal(discord.ui.Modal):
         view = RecruitView(party_data)
         embed = view.create_embed()
         await interaction.response.send_message(embed=embed, view=view)
+        try:
+            view.board_message = await interaction.original_response()
+        except Exception:
+            pass
 
 
 # ==========================================
-# 4. 純按鈕招募看板與滿員通知邏輯 (View)
+# 5. 第二層：職位選擇按鈕 View
+# ==========================================
+class PositionSelectView(discord.ui.View):
+    def __init__(
+        self,
+        parent_view: "RecruitView",
+        role_key: str,
+        board_message: discord.Message | None,
+    ):
+        super().__init__(timeout=180)
+        self.parent_view = parent_view
+        self.role_key = role_key
+        self.board_message = board_message
+        cfg = ROLE_POSITIONS[role_key]
+
+        for pos_label, style in cfg["positions"]:
+            btn = discord.ui.Button(label=pos_label, style=style)
+            btn.callback = self._make_position_callback(pos_label)
+            self.add_item(btn)
+
+        cancel_btn = discord.ui.Button(
+            label="❌ 取消目前報名",
+            style=discord.ButtonStyle.secondary,
+        )
+        cancel_btn.callback = self._on_cancel
+        self.add_item(cancel_btn)
+
+    def _make_position_callback(self, chosen_pos: str):
+        async def callback(interaction: discord.Interaction):
+            await self.parent_view.apply_position_selection(
+                interaction=interaction,
+                role_key=self.role_key,
+                chosen_position=chosen_pos,
+                board_message=self.board_message,
+            )
+
+        return callback
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        await self.parent_view.apply_position_selection(
+            interaction=interaction,
+            role_key=self.role_key,
+            chosen_position=None,
+            board_message=self.board_message,
+        )
+
+
+# ==========================================
+# 6. 第一層：主招募看板 View
 # ==========================================
 class RecruitView(discord.ui.View):
     def __init__(self, data):
         super().__init__(timeout=None)
         self.data = data
         self.notified_full = False
+        self.board_message: discord.Message | None = None
 
         if self.data["mode"] == "all_jobs":
             self.remove_item(self.join_tank)
@@ -125,6 +217,12 @@ class RecruitView(discord.ui.View):
             self.join_any.label = f"＋ 報名 / 取消 (0/{self.data['max_total']})"
         else:
             self.remove_item(self.join_any)
+            self._sync_role_buttons()
+
+    def _sync_role_buttons(self):
+        self.join_tank.label = f"＋ 選 Tank ({len(self.data['tanks'])}/2)"
+        self.join_healer.label = f"＋ 選 Healer ({len(self.data['healers'])}/2)"
+        self.join_dps.label = f"＋ 選 DPS ({len(self.data['dps'])}/4)"
 
     def _current_count(self) -> int:
         if self.data["mode"] == "all_jobs":
@@ -135,13 +233,32 @@ class RecruitView(discord.ui.View):
             + len(self.data["dps"])
         )
 
+    def _remove_user_from_all_roles(self, user_id: int) -> bool:
+        removed = False
+        for key in ("tanks", "healers", "dps"):
+            before = len(self.data[key])
+            self.data[key] = [
+                entry for entry in self.data[key] if entry["user"].id != user_id
+            ]
+            if len(self.data[key]) < before:
+                removed = True
+        return removed
+
+    def _format_role_list(self, role_key: str) -> str:
+        entries = self.data[role_key]
+        if not entries:
+            return "（尚無）"
+        return "\n".join(
+            [f"{entry['user'].mention} — **{entry['position']}**" for entry in entries]
+        )
+
     def create_embed(self):
         total = self._current_count()
         max_total = self.data["max_total"]
         is_full = total >= max_total
 
         mode_text = (
-            "規定職能 (2T / 2H / 4D)"
+            "規定職能 (2T / 2H / 4D・兩層選職位)"
             if self.data["mode"] == "role_restricted"
             else "所有職業（不限職能）"
         )
@@ -159,23 +276,19 @@ class RecruitView(discord.ui.View):
         )
 
         if self.data["mode"] == "role_restricted":
-            tank_str = "\n".join([m.mention for m in self.data["tanks"]]) or "（尚無）"
-            healer_str = "\n".join([m.mention for m in self.data["healers"]]) or "（尚無）"
-            dps_str = "\n".join([m.mention for m in self.data["dps"]]) or "（尚無）"
-
             embed.add_field(
                 name=f"🛡️ 坦克 Tank ({len(self.data['tanks'])}/2)",
-                value=tank_str,
+                value=self._format_role_list("tanks"),
                 inline=False,
             )
             embed.add_field(
                 name=f"💚 治療 Healer ({len(self.data['healers'])}/2)",
-                value=healer_str,
+                value=self._format_role_list("healers"),
                 inline=False,
             )
             embed.add_field(
                 name=f"⚔️ 輸出 DPS ({len(self.data['dps'])}/4)",
-                value=dps_str,
+                value=self._format_role_list("dps"),
                 inline=False,
             )
         else:
@@ -188,7 +301,9 @@ class RecruitView(discord.ui.View):
                 inline=False,
             )
 
-        embed.set_footer(text=f"目前人數：{total}/{max_total} ｜ 點擊下方按鈕即可登記或取消")
+        embed.set_footer(
+            text=f"目前人數：{total}/{max_total} ｜ 點擊職能按鈕後選擇對應職位"
+        )
         return embed
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
@@ -198,15 +313,15 @@ class RecruitView(discord.ui.View):
         if total_members >= max_total and not self.notified_full and interaction.channel:
             self.notified_full = True
             if self.data["mode"] == "all_jobs":
-                roster = self.data["members"]
+                roster_users = self.data["members"]
             else:
-                roster = (
-                    self.data["tanks"]
-                    + self.data["healers"]
-                    + self.data["dps"]
-                )
+                roster_users = [
+                    entry["user"]
+                    for key in ("tanks", "healers", "dps")
+                    for entry in self.data[key]
+                ]
 
-            all_members = [self.data["leader"]] + roster
+            all_members = [self.data["leader"]] + roster_users
             unique_mentions = []
             seen_ids = set()
             for member in all_members:
@@ -219,72 +334,116 @@ class RecruitView(discord.ui.View):
                 f"招募主題：**{self.data['title']}** — 隊長與隊員可以準備集合出發囉！"
             )
 
-    def _sync_role_buttons(self):
-        self.join_tank.label = f"＋ 登記 Tank ({len(self.data['tanks'])}/2)"
-        self.join_healer.label = f"＋ 登記 Healer ({len(self.data['healers'])}/2)"
-        self.join_dps.label = f"＋ 登記 DPS ({len(self.data['dps'])}/4)"
+    async def _open_position_selector(
+        self, interaction: discord.Interaction, role_key: str
+    ):
+        if interaction.message is not None:
+            self.board_message = interaction.message
 
-    async def _toggle_role(
+        cfg = ROLE_POSITIONS[role_key]
+        target_list = self.data[role_key]
+        already_in_role = any(
+            entry["user"].id == interaction.user.id for entry in target_list
+        )
+
+        if not already_in_role and len(target_list) >= cfg["limit"]:
+            await interaction.response.send_message(
+                f"❌ {cfg['display']} 已經額滿（{cfg['limit']}/{cfg['limit']}）囉！",
+                ephemeral=True,
+            )
+            return
+
+        pos_view = PositionSelectView(
+            parent_view=self,
+            role_key=role_key,
+            board_message=self.board_message,
+        )
+        await interaction.response.send_message(
+            f"請選擇你想擔任的 **{cfg['display']}** 職位：",
+            view=pos_view,
+            ephemeral=True,
+        )
+
+    async def apply_position_selection(
         self,
         interaction: discord.Interaction,
         role_key: str,
-        limit: int,
-        role_display: str,
+        chosen_position: str | None,
+        board_message: discord.Message | None,
     ):
         user = interaction.user
+        cfg = ROLE_POSITIONS[role_key]
         target_list = self.data[role_key]
+        target_msg = board_message or self.board_message
 
-        if any(m.id == user.id for m in target_list):
-            self.data[role_key] = [m for m in target_list if m.id != user.id]
-            await interaction.response.send_message(
-                f"已取消登記 {role_display}。", ephemeral=True
-            )
-        elif len(target_list) >= limit:
-            await interaction.response.send_message(
-                f"❌ {role_display} 已經額滿囉！", ephemeral=True
-            )
-            return
-        else:
-            for key in ("tanks", "healers", "dps"):
-                self.data[key] = [m for m in self.data[key] if m.id != user.id]
-            self.data[role_key].append(user)
-            await interaction.response.send_message(
-                f"✅ 成功登記為 {role_display}！", ephemeral=True
-            )
+        try:
+            if chosen_position is None:
+                removed = self._remove_user_from_all_roles(user.id)
+                self._sync_role_buttons()
+                msg = (
+                    "已取消你的目前職能報名。"
+                    if removed
+                    else "你目前尚未在任何職能名單中。"
+                )
+                await interaction.response.edit_message(content=msg, view=None)
+            else:
+                existing_in_target = next(
+                    (entry for entry in target_list if entry["user"].id == user.id), None
+                )
+                if existing_in_target is None and len(target_list) >= cfg["limit"]:
+                    await interaction.response.edit_message(
+                        content=f"❌ {cfg['display']} 剛剛已經額滿囉！", view=None
+                    )
+                    return
 
-        self._sync_role_buttons()
-        await interaction.message.edit(embed=self.create_embed(), view=self)
-        await self._check_and_notify_full(interaction)
+                self._remove_user_from_all_roles(user.id)
+                target_list.append({"user": user, "position": chosen_position})
+                self._sync_role_buttons()
+
+                await interaction.response.edit_message(
+                    content=f"✅ 已登記為 **{cfg['display']} — {chosen_position}**！",
+                    view=None,
+                )
+
+            if target_msg is not None:
+                await target_msg.edit(embed=self.create_embed(), view=self)
+
+            if chosen_position is not None:
+                await self._check_and_notify_full(interaction)
+
+        except Exception:
+            print("apply_position_selection 發生例外：")
+            traceback.print_exc()
 
     @discord.ui.button(
-        label="＋ 登記 Tank (0/2)",
+        label="＋ 選 Tank (0/2)",
         style=discord.ButtonStyle.primary,
         custom_id="join_tank",
     )
     async def join_tank(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        await self._toggle_role(interaction, "tanks", 2, "Tank")
+        await self._open_position_selector(interaction, "tanks")
 
     @discord.ui.button(
-        label="＋ 登記 Healer (0/2)",
+        label="＋ 選 Healer (0/2)",
         style=discord.ButtonStyle.success,
         custom_id="join_healer",
     )
     async def join_healer(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        await self._toggle_role(interaction, "healers", 2, "Healer")
+        await self._open_position_selector(interaction, "healers")
 
     @discord.ui.button(
-        label="＋ 登記 DPS (0/4)",
+        label="＋ 選 DPS (0/4)",
         style=discord.ButtonStyle.danger,
         custom_id="join_dps",
     )
     async def join_dps(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        await self._toggle_role(interaction, "dps", 4, "DPS")
+        await self._open_position_selector(interaction, "dps")
 
     @discord.ui.button(
         label="＋ 報名 / 取消",
@@ -316,7 +475,7 @@ class RecruitView(discord.ui.View):
 
 
 # ==========================================
-# 5. 註冊斜線指令與啟動機器人
+# 7. 註冊斜線指令與啟動機器人
 # ==========================================
 @bot.tree.command(name="recruit", description="發布一個新的 FF14 隊伍招募")
 @app_commands.describe(mode="選擇「規定職能 (2T/2H/4D)」或「所有職業 (不限職能)」")
