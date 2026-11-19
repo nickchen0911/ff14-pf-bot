@@ -202,6 +202,7 @@ class JobSelectView(discord.ui.View):
 
     async def on_select(self, interaction: discord.Interaction):
         chosen = self.select.values[0]
+        print(f"[選單觸發] 使用者={interaction.user} | 職能={self.role_key} | 選擇={chosen}")
         await self.parent_view.apply_job_selection(
             interaction=interaction,
             role_key=self.role_key,
@@ -351,6 +352,7 @@ class RecruitView(discord.ui.View):
     async def _open_job_selector(
         self, interaction: discord.Interaction, role_key: str
     ):
+        print(f"[按鈕觸發] 使用者={interaction.user} | 職能={role_key} | msg_id={getattr(interaction.message, 'id', None)}")
         cfg = ROLE_CONFIG[role_key]
         target_list = self.data[role_key]
         already_in_this_role = any(
