@@ -110,7 +110,7 @@ class RecruitModal(discord.ui.Modal):
 
 
 # ==========================================
-# 4. 全下拉選單招募看板與滿員通知邏輯 (View)
+# 4. 純按鈕招募看板與滿員通知邏輯 (View)
 # ==========================================
 class RecruitView(discord.ui.View):
     def __init__(self, data):
@@ -118,14 +118,13 @@ class RecruitView(discord.ui.View):
         self.data = data
         self.notified_full = False
 
-        self.select = discord.ui.Select(
-            placeholder="請從下拉選單選擇要登記或取消的項目...",
-            min_values=1,
-            max_values=1,
-        )
-        self.select.callback = self.on_select_changed
-        self._rebuild_select_options()
-        self.add_item(self.select)
+        if self.data["mode"] == "all_jobs":
+            self.remove_item(self.join_tank)
+            self.remove_item(self.join_healer)
+            self.remove_item(self.join_dps)
+            self.join_any.label = f"＋ 報名 / 取消 (0/{self.data['max_total']})"
+        else:
+            self.remove_item(self.join_any)
 
     def _current_count(self) -> int:
         if self.data["mode"] == "all_jobs":
@@ -135,60 +134,6 @@ class RecruitView(discord.ui.View):
             + len(self.data["healers"])
             + len(self.data["dps"])
         )
-
-    def _remove_user_from_all_roles(self, user_id: int) -> bool:
-        removed = False
-        for key in ("tanks", "healers", "dps"):
-            before = len(self.data[key])
-            self.data[key] = [m for m in self.data[key] if m.id != user_id]
-            if len(self.data[key]) < before:
-                removed = True
-        return removed
-
-    def _rebuild_select_options(self):
-        if self.data["mode"] == "all_jobs":
-            total = len(self.data["members"])
-            max_total = self.data["max_total"]
-            self.select.placeholder = f"所有職業報名 ({total}/{max_total}) — 點此選擇..."
-            self.select.options = [
-                discord.SelectOption(
-                    label=f"＋ 報名參加隊伍 ({total}/{max_total})",
-                    value="join_all",
-                    description="加入目前的隊伍名單",
-                ),
-                discord.SelectOption(
-                    label="－ 取消目前報名",
-                    value="leave_all",
-                    description="從已報名名單中退出",
-                ),
-            ]
-        else:
-            t_len = len(self.data["tanks"])
-            h_len = len(self.data["healers"])
-            d_len = len(self.data["dps"])
-            self.select.placeholder = "選擇職能（2T / 2H / 4D）或取消報名..."
-            self.select.options = [
-                discord.SelectOption(
-                    label=f"🛡️ 登記坦克 Tank ({t_len}/2)",
-                    value="tanks",
-                    description="加入坦克職能（上限 2 人）",
-                ),
-                discord.SelectOption(
-                    label=f"💚 登記治療 Healer ({h_len}/2)",
-                    value="healers",
-                    description="加入治療職能（上限 2 人）",
-                ),
-                discord.SelectOption(
-                    label=f"⚔️ 登記輸出 DPS ({d_len}/4)",
-                    value="dps",
-                    description="加入輸出職能（上限 4 人）",
-                ),
-                discord.SelectOption(
-                    label="－ 取消目前職能報名",
-                    value="cancel_role",
-                    description="退出目前的職能登記並釋放名額",
-                ),
-            ]
 
     def create_embed(self):
         total = self._current_count()
@@ -243,9 +188,7 @@ class RecruitView(discord.ui.View):
                 inline=False,
             )
 
-        embed.set_footer(
-            text=f"目前人數：{total}/{max_total} ｜ 請使用下方下拉選單進行登記或取消"
-        )
+        embed.set_footer(text=f"目前人數：{total}/{max_total} ｜ 點擊下方按鈕即可登記或取消")
         return embed
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
@@ -276,73 +219,99 @@ class RecruitView(discord.ui.View):
                 f"招募主題：**{self.data['title']}** — 隊長與隊員可以準備集合出發囉！"
             )
 
-    async def on_select_changed(self, interaction: discord.Interaction):
-        choice = self.select.values[0]
+    def _sync_role_buttons(self):
+        self.join_tank.label = f"＋ 登記 Tank ({len(self.data['tanks'])}/2)"
+        self.join_healer.label = f"＋ 登記 Healer ({len(self.data['healers'])}/2)"
+        self.join_dps.label = f"＋ 登記 DPS ({len(self.data['dps'])}/4)"
+
+    async def _toggle_role(
+        self,
+        interaction: discord.Interaction,
+        role_key: str,
+        limit: int,
+        role_display: str,
+    ):
         user = interaction.user
+        target_list = self.data[role_key]
 
-        if self.data["mode"] == "all_jobs":
-            members = self.data["members"]
-            max_total = self.data["max_total"]
-
-            if choice == "join_all":
-                if any(m.id == user.id for m in members):
-                    await interaction.response.send_message(
-                        "你已經在已報名名單中囉！", ephemeral=True
-                    )
-                    return
-                if len(members) >= max_total:
-                    await interaction.response.send_message(
-                        f"❌ 隊伍已經額滿（{max_total}/{max_total}）囉！",
-                        ephemeral=True,
-                    )
-                    return
-                members.append(user)
-                feedback = "✅ 成功報名參加！"
-            else:
-                before = len(members)
-                self.data["members"] = [m for m in members if m.id != user.id]
-                if len(self.data["members"]) == before:
-                    await interaction.response.send_message(
-                        "你目前尚未報名此隊伍。", ephemeral=True
-                    )
-                    return
-                feedback = "已取消報名。"
+        if any(m.id == user.id for m in target_list):
+            self.data[role_key] = [m for m in target_list if m.id != user.id]
+            await interaction.response.send_message(
+                f"已取消登記 {role_display}。", ephemeral=True
+            )
+        elif len(target_list) >= limit:
+            await interaction.response.send_message(
+                f"❌ {role_display} 已經額滿囉！", ephemeral=True
+            )
+            return
         else:
-            role_limits = {
-                "tanks": (2, "Tank"),
-                "healers": (2, "Healer"),
-                "dps": (4, "DPS"),
-            }
+            for key in ("tanks", "healers", "dps"):
+                self.data[key] = [m for m in self.data[key] if m.id != user.id]
+            self.data[role_key].append(user)
+            await interaction.response.send_message(
+                f"✅ 成功登記為 {role_display}！", ephemeral=True
+            )
 
-            if choice == "cancel_role":
-                removed = self._remove_user_from_all_roles(user.id)
-                if not removed:
-                    await interaction.response.send_message(
-                        "你目前尚未在任何職能名單中。", ephemeral=True
-                    )
-                    return
-                feedback = "已取消你的目前職能報名。"
-            else:
-                limit, role_display = role_limits[choice]
-                target_list = self.data[choice]
-                already_in_target = any(m.id == user.id for m in target_list)
+        self._sync_role_buttons()
+        await interaction.message.edit(embed=self.create_embed(), view=self)
+        await self._check_and_notify_full(interaction)
 
-                if not already_in_target and len(target_list) >= limit:
-                    await interaction.response.send_message(
-                        f"❌ {role_display} 已經額滿（{limit}/{limit}）囉！",
-                        ephemeral=True,
-                    )
-                    return
+    @discord.ui.button(
+        label="＋ 登記 Tank (0/2)",
+        style=discord.ButtonStyle.primary,
+        custom_id="join_tank",
+    )
+    async def join_tank(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._toggle_role(interaction, "tanks", 2, "Tank")
 
-                self._remove_user_from_all_roles(user.id)
-                if not already_in_target:
-                    target_list.append(user)
-                feedback = f"✅ 已登記為 {role_display}！"
+    @discord.ui.button(
+        label="＋ 登記 Healer (0/2)",
+        style=discord.ButtonStyle.success,
+        custom_id="join_healer",
+    )
+    async def join_healer(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._toggle_role(interaction, "healers", 2, "Healer")
 
-        self._rebuild_select_options()
-        await interaction.response.send_message(feedback, ephemeral=True)
-        if interaction.message is not None:
-            await interaction.message.edit(embed=self.create_embed(), view=self)
+    @discord.ui.button(
+        label="＋ 登記 DPS (0/4)",
+        style=discord.ButtonStyle.danger,
+        custom_id="join_dps",
+    )
+    async def join_dps(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._toggle_role(interaction, "dps", 4, "DPS")
+
+    @discord.ui.button(
+        label="＋ 報名 / 取消",
+        style=discord.ButtonStyle.primary,
+        custom_id="join_any",
+    )
+    async def join_any(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        user = interaction.user
+        members = self.data["members"]
+        max_total = self.data["max_total"]
+
+        if any(m.id == user.id for m in members):
+            self.data["members"] = [m for m in members if m.id != user.id]
+            await interaction.response.send_message("已取消報名。", ephemeral=True)
+        elif len(members) >= max_total:
+            await interaction.response.send_message(
+                f"❌ 隊伍已經額滿（{max_total}/{max_total}）囉！", ephemeral=True
+            )
+            return
+        else:
+            members.append(user)
+            await interaction.response.send_message("✅ 成功報名參加！", ephemeral=True)
+
+        button.label = f"＋ 報名 / 取消 ({len(self.data['members'])}/{max_total})"
+        await interaction.message.edit(embed=self.create_embed(), view=self)
         await self._check_and_notify_full(interaction)
 
 
