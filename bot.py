@@ -110,7 +110,7 @@ class RecruitModal(discord.ui.Modal):
 
 
 # ==========================================
-# 4. 互動按鈕、招募看板與滿員通知邏輯 (View)
+# 4. 純按鈕招募看板與滿員通知邏輯 (View)
 # ==========================================
 class RecruitView(discord.ui.View):
     def __init__(self, data):
@@ -331,4 +331,12 @@ async def recruit_command(
     mode: app_commands.Choice[str] = None,
 ):
     selected_mode = mode.value if mode else "role_restricted"
-    await interaction.
+    await interaction.response.send_modal(RecruitModal(mode=selected_mode))
+
+
+token = os.getenv("DISCORD_TOKEN")
+if not token:
+    raise RuntimeError("找不到 DISCORD_TOKEN 環境變數，請先在雲端或系統環境變數中設定。")
+
+start_health_server()
+bot.run(token)
