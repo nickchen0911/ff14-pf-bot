@@ -1,8 +1,32 @@
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord.ext import commands
 
-# 1. 初始化機器人
+# ==========================================
+# 1. Render Web Service 健康檢查伺服器
+# ==========================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+
+# ==========================================
+# 2. 初始化 Discord 機器人
+# ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -17,7 +41,9 @@ async def on_ready():
         print(f"指令同步失敗：{e}")
 
 
-# 2. 招募彈出視窗 (Modal)
+# ==========================================
+# 3. 招募彈出視窗 (Modal)
+# ==========================================
 class RecruitModal(discord.ui.Modal, title="發布 FF14 隊伍招募 (Party Finder)"):
     title_input = discord.ui.TextInput(
         label="招募標題 / 副本名稱",
@@ -47,17 +73,25 @@ class RecruitModal(discord.ui.Modal, title="發布 FF14 隊伍招募 (Party Find
         await interaction.response.send_message(embed=embed, view=view)
 
 
-# 3. 互動按鈕與招募看板邏輯 (View)
+# ==========================================
+# 4. 互動按鈕、招募看板與滿員通知邏輯 (View)
+# ==========================================
 class RecruitView(discord.ui.View):
     def __init__(self, data):
         super().__init__(timeout=None)
         self.data = data
+        self.notified_full = False  # 避免重複發送滿員通知
 
     def create_embed(self):
+        total = (
+            len(self.data["tanks"])
+            + len(self.data["healers"])
+            + len(self.data["dps"])
+        )
         embed = discord.Embed(
             title=f"⚔️ FF14 隊伍招募：{self.data['title']}",
             description=self.data["desc"],
-            color=discord.Color.gold(),
+            color=discord.Color.green() if total == 8 else discord.Color.gold(),
         )
         embed.set_author(
             name=f"隊長：{self.data['leader'].display_name}",
@@ -86,8 +120,35 @@ class RecruitView(discord.ui.View):
             inline=False,
         )
 
-        embed.set_footer(text="點擊下方按鈕即可登記或取消對應職能！")
+        embed.set_footer(text=f"目前人數：{total}/8 ｜ 點擊下方按鈕即可登記或取消對應職能")
         return embed
+
+    async def _check_and_notify_full(self, interaction: discord.Interaction):
+        total_members = (
+            len(self.data["tanks"])
+            + len(self.data["healers"])
+            + len(self.data["dps"])
+        )
+        if total_members == 8 and not self.notified_full and interaction.channel:
+            self.notified_full = True
+            all_members = (
+                [self.data["leader"]]
+                + self.data["tanks"]
+                + self.data["healers"]
+                + self.data["dps"]
+            )
+            # 依 user.id 去重，避免隊長同時也在名單內被重複標記
+            unique_mentions = []
+            seen_ids = set()
+            for member in all_members:
+                if member.id not in seen_ids:
+                    seen_ids.add(member.id)
+                    unique_mentions.append(member.mention)
+
+            await interaction.channel.send(
+                f"🎉 **隊伍已滿員（8/8）！** {' '.join(unique_mentions)}\n"
+                f"招募主題：**{self.data['title']}** — 隊長與隊員可以準備集合出發囉！"
+            )
 
     async def _toggle_role(
         self,
@@ -122,6 +183,7 @@ class RecruitView(discord.ui.View):
 
         button.label = f"{label_prefix} ({len(target_list)}/{limit})"
         await interaction.message.edit(embed=self.create_embed(), view=self)
+        await self._check_and_notify_full(interaction)
 
     @discord.ui.button(
         label="＋ 登記 Tank (0/2)",
@@ -160,15 +222,17 @@ class RecruitView(discord.ui.View):
         )
 
 
-# 4. 註冊斜線指令
+# ==========================================
+# 5. 註冊斜線指令與啟動機器人
+# ==========================================
 @bot.tree.command(name="recruit", description="發布一個新的 FF14 副本或挖寶隊伍招募")
 async def recruit_command(interaction: discord.Interaction):
     await interaction.response.send_modal(RecruitModal())
 
 
-# 5. 啟動機器人（優先讀取環境變數 DISCORD_TOKEN）
 token = os.getenv("DISCORD_TOKEN")
 if not token:
     raise RuntimeError("找不到 DISCORD_TOKEN 環境變數，請先在雲端或系統環境變數中設定。")
 
+start_health_server()
 bot.run(token)
