@@ -387,7 +387,6 @@ class RecruitView(discord.ui.View):
         target_list = self.data[role_key]
 
         try:
-            # 1. 取消報名
             if chosen_job is None:
                 removed = self._remove_user_from_all_roles(user.id)
                 self._sync_role_button_labels()
@@ -404,7 +403,6 @@ class RecruitView(discord.ui.View):
                 await board_message.edit(embed=self.create_embed(), view=self)
                 return
 
-            # 2. 檢查目標職能是否已額滿
             existing_in_target = next(
                 (entry for entry in target_list if entry["user"].id == user.id), None
             )
@@ -416,7 +414,6 @@ class RecruitView(discord.ui.View):
                     await interaction.edit_original_response(content=err_msg, view=None)
                 return
 
-            # 3. 更新名單並回應選單互動，再更新看板
             self._remove_user_from_all_roles(user.id)
             target_list.append({"user": user, "job": chosen_job})
             self._sync_role_button_labels()
@@ -499,4 +496,22 @@ class RecruitView(discord.ui.View):
 @bot.tree.command(name="recruit", description="發布一個新的 FF14 隊伍招募")
 @app_commands.describe(mode="選擇「規定職能 (2T/2H/4D)」或「所有職業 (不限職能)」")
 @app_commands.choices(
-    mode
+    mode=[
+        app_commands.Choice(name="規定職能 (2T / 2H / 4D)", value="role_restricted"),
+        app_commands.Choice(name="所有職業 (不限職能)", value="all_jobs"),
+    ]
+)
+async def recruit_command(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str] = None,
+):
+    selected_mode = mode.value if mode else "role_restricted"
+    await interaction.response.send_modal(RecruitModal(mode=selected_mode))
+
+
+token = os.getenv("DISCORD_TOKEN")
+if not token:
+    raise RuntimeError("找不到 DISCORD_TOKEN 環境變數，請先在雲端或系統環境變數中設定。")
+
+start_health_server()
+bot.run(token)
