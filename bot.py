@@ -1,7 +1,9 @@
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Literal
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 # ==========================================
@@ -44,28 +46,59 @@ async def on_ready():
 # ==========================================
 # 3. 招募彈出視窗 (Modal)
 # ==========================================
-class RecruitModal(discord.ui.Modal, title="發布 FF14 隊伍招募 (Party Finder)"):
+class RecruitModal(discord.ui.Modal):
     title_input = discord.ui.TextInput(
-        label="招募標題 / 副本名稱",
-        placeholder="例如：極神渡劫 / G15 挖寶車 6缺2",
+        label="招募標題 / 活動名稱",
+        placeholder="例如：極神渡劫 / G15 挖寶車 / 刷坐騎",
         max_length=100,
+    )
+    max_slots_input = discord.ui.TextInput(
+        label="隊伍總人數上限（預設 8 人，可填 2～24）",
+        placeholder="8",
+        default="8",
+        max_length=2,
+        required=True,
     )
     description = discord.ui.TextInput(
         label="詳細說明與要求",
-        placeholder="例如：自備水藥食物，需看過攻略，通關後...",
+        placeholder="例如：不限職業、自備水藥食物、集合地點...",
         style=discord.TextStyle.paragraph,
         max_length=400,
         required=False,
     )
 
+    def __init__(self, mode: Literal["role_restricted", "all_jobs"]):
+        mode_label = "規定職能 (2T/2H/4D)" if mode == "role_restricted" else "所有職業 (不限職能)"
+        super().__init__(title=f"發布招募｜{mode_label}")
+        self.mode = mode
+
+        # 若為規定職能模式，固定為標準 8 人編制並鎖定人數欄位
+        if mode == "role_restricted":
+            self.max_slots_input.default = "8"
+            self.max_slots_input.label = "規定職能編制固定為 8 人 (2T / 2H / 4D)"
+
     async def on_submit(self, interaction: discord.Interaction):
+        if self.mode == "role_restricted":
+            max_total = 8
+        else:
+            raw_slots = (self.max_slots_input.value or "8").strip()
+            if not raw_slots.isdigit() or not (2 <= int(raw_slots) <= 24):
+                await interaction.response.send_message(
+                    "❌ 人數上限請輸入 2 到 24 之間的數字！", ephemeral=True
+                )
+                return
+            max_total = int(raw_slots)
+
         party_data = {
             "leader": interaction.user,
+            "mode": self.mode,
+            "max_total": max_total,
             "title": self.title_input.value,
             "desc": self.description.value or "無特別說明",
             "tanks": [],
             "healers": [],
             "dps": [],
+            "members": [],  # 用於「所有職業」模式
         }
 
         view = RecruitView(party_data)
@@ -80,18 +113,37 @@ class RecruitView(discord.ui.View):
     def __init__(self, data):
         super().__init__(timeout=None)
         self.data = data
-        self.notified_full = False  # 避免重複發送滿員通知
+        self.notified_full = False
 
-    def create_embed(self):
-        total = (
+        # 依照模式動態調整按鈕配置
+        if self.data["mode"] == "all_jobs":
+            self.remove_item(self.join_tank)
+            self.remove_item(self.join_healer)
+            self.remove_item(self.join_dps)
+            self.join_any.label = f"＋ 報名 / 取消 (0/{self.data['max_total']})"
+        else:
+            self.remove_item(self.join_any)
+
+    def _current_count(self) -> int:
+        if self.data["mode"] == "all_jobs":
+            return len(self.data["members"])
+        return (
             len(self.data["tanks"])
             + len(self.data["healers"])
             + len(self.data["dps"])
         )
+
+    def create_embed(self):
+        total = self._current_count()
+        max_total = self.data["max_total"]
+        is_full = total >= max_total
+
+        mode_text = "規定職能 (2T / 2H / 4D)" if self.data["mode"] == "role_restricted" else "所有職業（不限職能）"
+
         embed = discord.Embed(
             title=f"⚔️ FF14 隊伍招募：{self.data['title']}",
-            description=self.data["desc"],
-            color=discord.Color.green() if total == 8 else discord.Color.gold(),
+            description=f"**職業模式：** {mode_text}\n\n{self.data['desc']}",
+            color=discord.Color.green() if is_full else discord.Color.gold(),
         )
         embed.set_author(
             name=f"隊長：{self.data['leader'].display_name}",
@@ -100,44 +152,55 @@ class RecruitView(discord.ui.View):
             else None,
         )
 
-        tank_str = "\n".join([m.mention for m in self.data["tanks"]]) or "（尚無）"
-        healer_str = "\n".join([m.mention for m in self.data["healers"]]) or "（尚無）"
-        dps_str = "\n".join([m.mention for m in self.data["dps"]]) or "（尚無）"
+        if self.data["mode"] == "role_restricted":
+            tank_str = "\n".join([m.mention for m in self.data["tanks"]]) or "（尚無）"
+            healer_str = "\n".join([m.mention for m in self.data["healers"]]) or "（尚無）"
+            dps_str = "\n".join([m.mention for m in self.data["dps"]]) or "（尚無）"
 
-        embed.add_field(
-            name=f"🛡️ 坦克 Tank ({len(self.data['tanks'])}/2)",
-            value=tank_str,
-            inline=False,
-        )
-        embed.add_field(
-            name=f"💚 治療 Healer ({len(self.data['healers'])}/2)",
-            value=healer_str,
-            inline=False,
-        )
-        embed.add_field(
-            name=f"⚔️ 輸出 DPS ({len(self.data['dps'])}/4)",
-            value=dps_str,
-            inline=False,
-        )
+            embed.add_field(
+                name=f"🛡️ 坦克 Tank ({len(self.data['tanks'])}/2)",
+                value=tank_str,
+                inline=False,
+            )
+            embed.add_field(
+                name=f"💚 治療 Healer ({len(self.data['healers'])}/2)",
+                value=healer_str,
+                inline=False,
+            )
+            embed.add_field(
+                name=f"⚔️ 輸出 DPS ({len(self.data['dps'])}/4)",
+                value=dps_str,
+                inline=False,
+            )
+        else:
+            members_str = "\n".join(
+                [f"{idx + 1}. {m.mention}" for idx, m in enumerate(self.data["members"])]
+            ) or "（尚無）"
+            embed.add_field(
+                name=f"👥 已報名成員 ({total}/{max_total})",
+                value=members_str,
+                inline=False,
+            )
 
-        embed.set_footer(text=f"目前人數：{total}/8 ｜ 點擊下方按鈕即可登記或取消對應職能")
+        embed.set_footer(text=f"目前人數：{total}/{max_total} ｜ 點擊下方按鈕即可登記或取消")
         return embed
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
-        total_members = (
-            len(self.data["tanks"])
-            + len(self.data["healers"])
-            + len(self.data["dps"])
-        )
-        if total_members == 8 and not self.notified_full and interaction.channel:
+        total_members = self._current_count()
+        max_total = self.data["max_total"]
+
+        if total_members >= max_total and not self.notified_full and interaction.channel:
             self.notified_full = True
-            all_members = (
-                [self.data["leader"]]
-                + self.data["tanks"]
-                + self.data["healers"]
-                + self.data["dps"]
-            )
-            # 依 user.id 去重，避免隊長同時也在名單內被重複標記
+            if self.data["mode"] == "all_jobs":
+                roster = self.data["members"]
+            else:
+                roster = (
+                    self.data["tanks"]
+                    + self.data["healers"]
+                    + self.data["dps"]
+                )
+
+            all_members = [self.data["leader"]] + roster
             unique_mentions = []
             seen_ids = set()
             for member in all_members:
@@ -146,7 +209,7 @@ class RecruitView(discord.ui.View):
                     unique_mentions.append(member.mention)
 
             await interaction.channel.send(
-                f"🎉 **隊伍已滿員（8/8）！** {' '.join(unique_mentions)}\n"
+                f"🎉 **隊伍已滿員（{total_members}/{max_total}）！** {' '.join(unique_mentions)}\n"
                 f"招募主題：**{self.data['title']}** — 隊長與隊員可以準備集合出發囉！"
             )
 
@@ -221,13 +284,52 @@ class RecruitView(discord.ui.View):
             interaction, button, "dps", 4, "＋ 登記 DPS", "DPS"
         )
 
+    @discord.ui.button(
+        label="＋ 報名 / 取消",
+        style=discord.ButtonStyle.primary,
+        custom_id="join_any",
+    )
+    async def join_any(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        user = interaction.user
+        members = self.data["members"]
+        max_total = self.data["max_total"]
+
+        if user in members:
+            members.remove(user)
+            await interaction.response.send_message("已取消報名。", ephemeral=True)
+        elif len(members) >= max_total:
+            await interaction.response.send_message(
+                f"❌ 隊伍已經額滿（{max_total}/{max_total}）囉！", ephemeral=True
+            )
+            return
+        else:
+            members.append(user)
+            await interaction.response.send_message("✅ 成功報名參加！", ephemeral=True)
+
+        button.label = f"＋ 報名 / 取消 ({len(members)}/{max_total})"
+        await interaction.message.edit(embed=self.create_embed(), view=self)
+        await self._check_and_notify_full(interaction)
+
 
 # ==========================================
 # 5. 註冊斜線指令與啟動機器人
 # ==========================================
-@bot.tree.command(name="recruit", description="發布一個新的 FF14 副本或挖寶隊伍招募")
-async def recruit_command(interaction: discord.Interaction):
-    await interaction.response.send_modal(RecruitModal())
+@bot.tree.command(name="recruit", description="發布一個新的 FF14 隊伍招募")
+@app_commands.describe(mode="選擇「規定職能 (2T/2H/4D)」或「所有職業 (不限職能)」")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="規定職能 (2T / 2H / 4D)", value="role_restricted"),
+        app_commands.Choice(name="所有職業 (不限職能)", value="all_jobs"),
+    ]
+)
+async def recruit_command(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str] = None,
+):
+    selected_mode = mode.value if mode else "role_restricted"
+    await interaction.response.send_modal(RecruitModal(mode=selected_mode))
 
 
 token = os.getenv("DISCORD_TOKEN")
