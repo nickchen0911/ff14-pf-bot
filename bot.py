@@ -127,7 +127,6 @@ class RecruitModal(discord.ui.Modal):
                 return
             max_total = int(raw_slots)
 
-        # 規定職能模式下，每筆紀錄為 {"user": discord.User, "position": str}
         party_data = {
             "leader": interaction.user,
             "mode": self.mode,
@@ -142,11 +141,10 @@ class RecruitModal(discord.ui.Modal):
 
         view = RecruitView(party_data)
         embed = view.create_embed()
-        await interaction.response.send_message(embed=embed, view=view)
-        try:
-            view.board_message = await interaction.original_response()
-        except Exception:
-            pass
+        await interaction.response.defer()
+        sent_msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+        view.board_channel_id = sent_msg.channel.id
+        view.board_message_id = sent_msg.id
 
 
 # ==========================================
@@ -157,12 +155,14 @@ class PositionSelectView(discord.ui.View):
         self,
         parent_view: "RecruitView",
         role_key: str,
-        board_message: discord.Message | None,
+        channel_id: int | None,
+        message_id: int | None,
     ):
         super().__init__(timeout=180)
         self.parent_view = parent_view
         self.role_key = role_key
-        self.board_message = board_message
+        self.channel_id = channel_id
+        self.message_id = message_id
         cfg = ROLE_POSITIONS[role_key]
 
         for pos_label, style in cfg["positions"]:
@@ -183,7 +183,8 @@ class PositionSelectView(discord.ui.View):
                 interaction=interaction,
                 role_key=self.role_key,
                 chosen_position=chosen_pos,
-                board_message=self.board_message,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
             )
 
         return callback
@@ -193,7 +194,8 @@ class PositionSelectView(discord.ui.View):
             interaction=interaction,
             role_key=self.role_key,
             chosen_position=None,
-            board_message=self.board_message,
+            channel_id=self.channel_id,
+            message_id=self.message_id,
         )
 
 
@@ -205,7 +207,8 @@ class RecruitView(discord.ui.View):
         super().__init__(timeout=None)
         self.data = data
         self.notified_full = False
-        self.board_message: discord.Message | None = None
+        self.board_channel_id: int | None = None
+        self.board_message_id: int | None = None
 
         if self.data["mode"] == "all_jobs":
             self.remove_item(self.join_tank)
@@ -303,24 +306,28 @@ class RecruitView(discord.ui.View):
         )
         return embed
 
-    async def _refresh_board_message(
-        self, interaction: discord.Interaction, board_message: discord.Message | None
+    async def _refresh_board_by_ids(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int | None,
+        message_id: int | None,
     ):
-        target_msg = board_message or self.board_message
-        new_embed = self.create_embed()
+        cid = channel_id or self.board_channel_id or (
+            interaction.channel.id if interaction.channel else None
+        )
+        mid = message_id or self.board_message_id
 
-        if target_msg is not None:
-            await target_msg.edit(embed=new_embed, view=self)
+        if cid is None or mid is None:
+            print(f"[雙層更新失敗] 缺少 cid={cid} 或 mid={mid}")
             return
 
-        if interaction.channel and hasattr(interaction.channel, "history"):
-            async for msg in interaction.channel.history(limit=15):
-                if msg.author.id == bot.user.id and msg.embeds:
-                    first_title = msg.embeds[0].title or ""
-                    if self.data["title"] in first_title:
-                        self.board_message = msg
-                        await msg.edit(embed=new_embed, view=self)
-                        return
+        channel = bot.get_channel(cid)
+        if channel is None:
+            channel = await bot.fetch_channel(cid)
+
+        msg = await channel.fetch_message(mid)
+        await msg.edit(embed=self.create_embed(), view=self)
+        print(f"[雙層更新成功] cid={cid}, mid={mid}")
 
     async def _check_and_notify_full(self, interaction: discord.Interaction):
         total_members = self._current_count()
@@ -354,7 +361,11 @@ class RecruitView(discord.ui.View):
         self, interaction: discord.Interaction, role_key: str
     ):
         if interaction.message is not None:
-            self.board_message = interaction.message
+            self.board_message_id = interaction.message.id
+            if interaction.message.channel is not None:
+                self.board_channel_id = interaction.message.channel.id
+        elif interaction.channel is not None:
+            self.board_channel_id = interaction.channel.id
 
         cfg = ROLE_POSITIONS[role_key]
         target_list = self.data[role_key]
@@ -372,7 +383,8 @@ class RecruitView(discord.ui.View):
         pos_view = PositionSelectView(
             parent_view=self,
             role_key=role_key,
-            board_message=self.board_message,
+            channel_id=self.board_channel_id,
+            message_id=self.board_message_id,
         )
         await interaction.response.send_message(
             f"請選擇你想擔任的 **{cfg['display']}** 定位：",
@@ -385,7 +397,8 @@ class RecruitView(discord.ui.View):
         interaction: discord.Interaction,
         role_key: str,
         chosen_position: str | None,
-        board_message: discord.Message | None,
+        channel_id: int | None,
+        message_id: int | None,
     ):
         user = interaction.user
         cfg = ROLE_POSITIONS[role_key]
@@ -420,7 +433,7 @@ class RecruitView(discord.ui.View):
                     view=None,
                 )
 
-            await self._refresh_board_message(interaction, board_message)
+            await self._refresh_board_by_ids(interaction, channel_id, message_id)
 
             if chosen_position is not None:
                 await self._check_and_notify_full(interaction)
