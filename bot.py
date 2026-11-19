@@ -171,7 +171,7 @@ class JobSelectView(discord.ui.View):
         self,
         parent_view: "RecruitView",
         role_key: str,
-        board_message: discord.Message,
+        board_message: discord.Message | None,
     ):
         super().__init__(timeout=60)
         self.parent_view = parent_view
@@ -380,7 +380,7 @@ class RecruitView(discord.ui.View):
         interaction: discord.Interaction,
         role_key: str,
         chosen_job: str | None,
-        board_message: discord.Message,
+        board_message: discord.Message | None,
     ):
         user = interaction.user
         cfg = ROLE_CONFIG[role_key]
@@ -421,19 +421,27 @@ class RecruitView(discord.ui.View):
                 else:
                     await interaction.edit_original_response(content=ok_msg, view=None)
 
-            try:
-                target_msg = board_message
-                if interaction.channel and hasattr(interaction.channel, "fetch_message"):
-                    target_msg = await interaction.channel.fetch_message(board_message.id)
-                await target_msg.edit(embed=self.create_embed(), view=self)
-            except Exception as edit_err:
-                print(f"更新招募看板失敗：{edit_err}")
+            print(
+                f"[招募更新] 標題={self.data['title']} | "
+                f"T={len(self.data['tanks'])}/2, H={len(self.data['healers'])}/2, D={len(self.data['dps'])}/4"
+            )
+
+            channel = interaction.channel
+            if channel is None and board_message is not None:
+                channel = board_message.channel
+
+            if (
+                board_message is not None
+                and channel is not None
+                and hasattr(channel, "fetch_message")
+            ):
+                fresh_msg = await channel.fetch_message(board_message.id)
+                await fresh_msg.edit(embed=self.create_embed(), view=self)
+            elif board_message is not None:
+                await board_message.edit(embed=self.create_embed(), view=self)
 
             if chosen_job is not None:
-                try:
-                    await self._check_and_notify_full(interaction)
-                except Exception as notify_err:
-                    print(f"發送滿員通知失敗：{notify_err}")
+                await self._check_and_notify_full(interaction)
 
         except Exception:
             print("apply_job_selection 發生例外：")
