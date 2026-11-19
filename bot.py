@@ -131,8 +131,7 @@ class RecruitModal(discord.ui.Modal):
         self.mode = mode
 
         if mode == "role_restricted":
-            self.max_slots_input.default = "8"
-            self.max_slots_input.label = "規定職能編制固定為 8 人 (2T / 2H / 4D)"
+            self.remove_item(self.max_slots_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if self.mode == "role_restricted":
