@@ -191,17 +191,17 @@ class JobSelectView(discord.ui.View):
             )
         )
 
-        select = discord.ui.Select(
+        self.select = discord.ui.Select(
             placeholder=f"選擇你的 {cfg['display']} 職業...",
             min_values=1,
             max_values=1,
             options=options,
         )
-        select.callback = self.on_select
-        self.add_item(select)
+        self.select.callback = self.on_select
+        self.add_item(self.select)
 
     async def on_select(self, interaction: discord.Interaction):
-        chosen = interaction.values[0]
+        chosen = self.select.values[0]
         await self.parent_view.apply_job_selection(
             interaction=interaction,
             role_key=self.role_key,
@@ -399,33 +399,41 @@ class RecruitView(discord.ui.View):
                     await interaction.response.edit_message(content=msg, view=None)
                 else:
                     await interaction.edit_original_response(content=msg, view=None)
-
-                await board_message.edit(embed=self.create_embed(), view=self)
-                return
-
-            existing_in_target = next(
-                (entry for entry in target_list if entry["user"].id == user.id), None
-            )
-            if existing_in_target is None and len(target_list) >= cfg["limit"]:
-                err_msg = f"❌ {cfg['display']} 剛剛已經額滿囉！"
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(content=err_msg, view=None)
-                else:
-                    await interaction.edit_original_response(content=err_msg, view=None)
-                return
-
-            self._remove_user_from_all_roles(user.id)
-            target_list.append({"user": user, "job": chosen_job})
-            self._sync_role_button_labels()
-
-            ok_msg = f"✅ 已登記為 **{cfg['display']} — {chosen_job}**！"
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(content=ok_msg, view=None)
             else:
-                await interaction.edit_original_response(content=ok_msg, view=None)
+                existing_in_target = next(
+                    (entry for entry in target_list if entry["user"].id == user.id), None
+                )
+                if existing_in_target is None and len(target_list) >= cfg["limit"]:
+                    err_msg = f"❌ {cfg['display']} 剛剛已經額滿囉！"
+                    if not interaction.response.is_done():
+                        await interaction.response.edit_message(content=err_msg, view=None)
+                    else:
+                        await interaction.edit_original_response(content=err_msg, view=None)
+                    return
 
-            await board_message.edit(embed=self.create_embed(), view=self)
-            await self._check_and_notify_full(interaction)
+                self._remove_user_from_all_roles(user.id)
+                target_list.append({"user": user, "job": chosen_job})
+                self._sync_role_button_labels()
+
+                ok_msg = f"✅ 已登記為 **{cfg['display']} — {chosen_job}**！"
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(content=ok_msg, view=None)
+                else:
+                    await interaction.edit_original_response(content=ok_msg, view=None)
+
+            try:
+                target_msg = board_message
+                if interaction.channel and hasattr(interaction.channel, "fetch_message"):
+                    target_msg = await interaction.channel.fetch_message(board_message.id)
+                await target_msg.edit(embed=self.create_embed(), view=self)
+            except Exception as edit_err:
+                print(f"更新招募看板失敗：{edit_err}")
+
+            if chosen_job is not None:
+                try:
+                    await self._check_and_notify_full(interaction)
+                except Exception as notify_err:
+                    print(f"發送滿員通知失敗：{notify_err}")
 
         except Exception:
             print("apply_job_selection 發生例外：")
