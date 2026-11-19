@@ -160,6 +160,10 @@ class RecruitModal(discord.ui.Modal):
         view = RecruitView(party_data)
         embed = view.create_embed()
         await interaction.response.send_message(embed=embed, view=view)
+        try:
+            view.board_message = await interaction.original_response()
+        except Exception:
+            pass
 
 
 # ==========================================
@@ -439,9 +443,10 @@ class RecruitView(discord.ui.View):
                 f"target_msg_id={getattr(target_msg, 'id', None)}"
             )
 
+            new_embed = self.create_embed()
             if target_msg is not None:
-                await target_msg.edit(embed=self.create_embed(), view=self)
-                print("[招募更新] 看板訊息編輯完成")
+                edited = await target_msg.edit(embed=new_embed, view=self)
+                print(f"[招募更新] 看板訊息編輯完成，edited_id={getattr(edited, 'id', None)}")
             else:
                 print("[招募更新] 找不到目標招募看板訊息，無法更新")
 
